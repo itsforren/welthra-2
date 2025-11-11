@@ -1,46 +1,29 @@
-import { generateUUID } from "@/lib/utils";
+// app/api/chat/route.ts
+import OpenAI from "openai";
 
-export const TEST_PROMPTS = {
-  SKY: {
-    MESSAGE: {
-      id: generateUUID(),
-      createdAt: new Date().toISOString(),
-      role: "user",
-      content: "Why is the sky blue?",
-      parts: [{ type: "text", text: "Why is the sky blue?" }],
+export const runtime = "edge";
+
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  // If you are using Vercel AI Gateway:
+  // baseURL: process.env.OPENAI_BASE_URL,
+  // apiKey: process.env.AI_GATEWAY_API_KEY,
+});
+
+export async function POST(req: Request) {
+  const { messages } = await req.json();
+
+  const stream = await client.responses.stream({
+    model: "gpt-4o-mini",
+    prompt_id: process.env.OPENAI_PROMPT_ID!, // <--- your saved prompt
+    input: messages,
+  });
+
+  return new Response(stream.toReadableStream(), {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
     },
-    OUTPUT_STREAM: [
-      'data: {"type":"start-step"}',
-      'data: {"type":"text-start","id":"STATIC_ID"}',
-      'data: {"type":"text-delta","id":"STATIC_ID","delta":"It\'s "}',
-      'data: {"type":"text-delta","id":"STATIC_ID","delta":"just "}',
-      'data: {"type":"text-delta","id":"STATIC_ID","delta":"blue "}',
-      'data: {"type":"text-delta","id":"STATIC_ID","delta":"duh! "}',
-      'data: {"type":"text-end","id":"STATIC_ID"}',
-      'data: {"type":"finish-step"}',
-      'data: {"type":"finish"}',
-      "data: [DONE]",
-    ],
-  },
-  GRASS: {
-    MESSAGE: {
-      id: generateUUID(),
-      createdAt: new Date().toISOString(),
-      role: "user",
-      content: "Why is grass green?",
-      parts: [{ type: "text", text: "Why is grass green?" }],
-    },
-    OUTPUT_STREAM: [
-      'data: {"type":"start-step"}',
-      'data: {"type":"text-start","id":"STATIC_ID"}',
-      'data: {"type":"text-delta","id":"STATIC_ID","delta":"It\'s "}',
-      'data: {"type":"text-delta","id":"STATIC_ID","delta":"just "}',
-      'data: {"type":"text-delta","id":"STATIC_ID","delta":"green "}',
-      'data: {"type":"text-delta","id":"STATIC_ID","delta":"duh! "}',
-      'data: {"type":"text-end","id":"STATIC_ID"}',
-      'data: {"type":"finish-step"}',
-      'data: {"type":"finish"}',
-      "data: [DONE]",
-    ],
-  },
-};
+  });
+}
