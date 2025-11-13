@@ -1,11 +1,10 @@
+// app/api/chat/route.ts
+
 import { geolocation } from "@vercel/functions";
 import {
-  convertToModelMessages,
   createUIMessageStream,
   JsonToSseTransformStream,
-  smoothStream,
-  stepCountIs,
-  streamText,
+  type UIMessageStreamWriter,
 } from "ai";
 import { unstable_cache as cache } from "next/cache";
 import { after } from "next/server";
@@ -17,16 +16,8 @@ import type { ModelCatalog } from "tokenlens/core";
 import { fetchModels } from "tokenlens/fetch";
 import { getUsage } from "tokenlens/helpers";
 import { auth, type UserType } from "@/app/(auth)/auth";
-import type { VisibilityType } from "@/components/visibility-selector";
 import { entitlementsByUserType } from "@/lib/ai/entitlements";
-import type { ChatModel } from "@/lib/ai/models";
 import { type RequestHints, systemPrompt } from "@/lib/ai/prompts";
-import { myProvider } from "@/lib/ai/providers";
-import { createDocument } from "@/lib/ai/tools/create-document";
-import { getWeather } from "@/lib/ai/tools/get-weather";
-import { requestSuggestions } from "@/lib/ai/tools/request-suggestions";
-import { updateDocument } from "@/lib/ai/tools/update-document";
-import { isProductionEnvironment } from "@/lib/constants";
 import {
   createStreamId,
   deleteChatById,
@@ -39,6 +30,13 @@ import {
 } from "@/lib/db/queries";
 import type { DBMessage } from "@/lib/db/schema";
 import { ChatSDKError } from "@/lib/errors";
+import {
+  buildResponsesInput,
+  getModelConfig,
+  mapResponsesUsageToLanguageModelUsage,
+} from "@/lib/openai";
+import { openai } from "@/lib/server/openai";
+
 import type { ChatMessage } from "@/lib/types";
 import type { AppUsage } from "@/lib/usage";
 import { convertToUIMessages, generateUUID } from "@/lib/utils";
@@ -58,30 +56,25 @@ const getTokenlensCatalog = cache(
         "TokenLens: catalog fetch failed, using default catalog",
         err
       );
-      return; // tokenlens helpers will fall back to defaultCatalog
+      return;
     }
   },
   ["tokenlens-catalog"],
-  { revalidate: 24 * 60 * 60 } // 24 hours
+  { revalidate: 24 * 60 * 60 }
 );
 
 export function getStreamContext() {
   if (!globalStreamContext) {
     try {
-      globalStreamContext = createResumableStreamContext({
-        waitUntil: after,
-      });
+      globalStreamContext = createResumableStreamContext({ waitUntil: after });
     } catch (error: any) {
       if (error.message.includes("REDIS_URL")) {
-        console.log(
-          " > Resumable streams are disabled due to missing REDIS_URL"
-        );
+        console.log(" > Resumable streams disabled: missing REDIS_URL");
       } else {
         console.error(error);
       }
     }
   }
-
   return globalStreamContext;
 }
 
@@ -96,17 +89,8 @@ export async function POST(request: Request) {
   }
 
   try {
-    const {
-      id,
-      message,
-      selectedChatModel,
-      selectedVisibilityType,
-    }: {
-      id: string;
-      message: ChatMessage;
-      selectedChatModel: ChatModel["id"];
-      selectedVisibilityType: VisibilityType;
-    } = requestBody;
+    const { id, message, selectedChatModel, selectedVisibilityType } =
+      requestBody;
 
     const session = await auth();
 
@@ -132,12 +116,9 @@ export async function POST(request: Request) {
       if (chat.userId !== session.user.id) {
         return new ChatSDKError("forbidden:chat").toResponse();
       }
-      // Only fetch messages if chat already exists
       messagesFromDb = await getMessagesByChatId({ id });
     } else {
-      const title = await generateTitleFromUserMessage({
-        message,
-      });
+      const title = await generateTitleFromUserMessage({ message });
 
       await saveChat({
         id,
@@ -145,7 +126,6 @@ export async function POST(request: Request) {
         title,
         visibility: selectedVisibilityType,
       });
-      // New chat - no need to fetch messages, it's empty
     }
 
     const uiMessages = [...convertToUIMessages(messagesFromDb), message];
@@ -175,92 +155,114 @@ export async function POST(request: Request) {
     const streamId = generateUUID();
     await createStreamId({ streamId, chatId: id });
 
+    const { model } = getModelConfig(selectedChatModel);
+
+    const responsesInput = buildResponsesInput({
+      messages: uiMessages,
+      systemPrompt: systemPrompt({
+        selectedChatModel,
+        requestHints,
+      }),
+    });
+
     let finalMergedUsage: AppUsage | undefined;
+    let streamedAssistantMessage: ChatMessage | null = null;
 
-    const stream = createUIMessageStream({
-      execute: ({ writer: dataStream }) => {
-        const result = streamText({
-          model: myProvider.languageModel(selectedChatModel),
-          system: systemPrompt({ selectedChatModel, requestHints }),
-          messages: convertToModelMessages(uiMessages),
-          stopWhen: stepCountIs(5),
-          experimental_activeTools:
-            selectedChatModel === "chat-model-reasoning"
-              ? []
-              : [
-                  "getWeather",
-                  "createDocument",
-                  "updateDocument",
-                  "requestSuggestions",
-                ],
-          experimental_transform: smoothStream({ chunking: "word" }),
-          tools: {
-            getWeather,
-            createDocument: createDocument({ session, dataStream }),
-            updateDocument: updateDocument({ session, dataStream }),
-            requestSuggestions: requestSuggestions({
-              session,
-              dataStream,
-            }),
-          },
-          experimental_telemetry: {
-            isEnabled: isProductionEnvironment,
-            functionId: "stream-text",
-          },
-          onFinish: async ({ usage }) => {
-            try {
-              const providers = await getTokenlensCatalog();
-              const modelId =
-                myProvider.languageModel(selectedChatModel).modelId;
-              if (!modelId) {
-                finalMergedUsage = usage;
-                dataStream.write({
-                  type: "data-usage",
-                  data: finalMergedUsage,
-                });
-                return;
-              }
+    const stream = createUIMessageStream<ChatMessage>({
+      execute: async ({ writer }) => {
+        try {
+          writer.write({ type: "start" });
 
-              if (!providers) {
-                finalMergedUsage = usage;
-                dataStream.write({
-                  type: "data-usage",
-                  data: finalMergedUsage,
-                });
-                return;
-              }
+          const responseSummary = await streamOpenAIResponse({
+            model,
+            input: responsesInput,
+            metadata: {
+              chatId: id,
+              userId: session.user.id,
+            },
+            writer,
+          });
 
-              const summary = getUsage({ modelId, usage, providers });
-              finalMergedUsage = { ...usage, ...summary, modelId } as AppUsage;
-              dataStream.write({ type: "data-usage", data: finalMergedUsage });
-            } catch (err) {
-              console.warn("TokenLens enrichment failed", err);
-              finalMergedUsage = usage;
-              dataStream.write({ type: "data-usage", data: finalMergedUsage });
+          const assistantText = responseSummary.text;
+          if (assistantText?.length) {
+            streamedAssistantMessage = {
+              id: generateUUID(),
+              role: "assistant",
+              parts: [{ type: "text", text: assistantText }],
+            };
+
+            writer.write({
+              type: "data-appendMessage",
+              data: JSON.stringify(streamedAssistantMessage),
+              transient: true,
+            });
+          }
+
+          const usageForFinish = mapResponsesUsageToLanguageModelUsage(
+            responseSummary.usage
+          );
+
+          try {
+            const providers = await getTokenlensCatalog();
+
+            if (responseSummary.modelId) {
+              const totalTokens = usageForFinish.totalTokens ?? 0;
+              const summary =
+                providers && totalTokens > 0
+                  ? getUsage({
+                      modelId: responseSummary.modelId,
+                      usage: usageForFinish,
+                      providers,
+                    })
+                  : undefined;
+
+              finalMergedUsage = summary
+                ? ({
+                    ...usageForFinish,
+                    ...summary,
+                    modelId: responseSummary.modelId,
+                  } as AppUsage)
+                : ({
+                    ...usageForFinish,
+                    modelId: responseSummary.modelId,
+                  } as AppUsage);
+            } else {
+              finalMergedUsage = usageForFinish as AppUsage;
             }
-          },
-        });
 
-        result.consumeStream();
+            if (finalMergedUsage) {
+              writer.write({ type: "data-usage", data: finalMergedUsage });
+            }
+          } catch (err) {
+            console.warn("TokenLens enrichment failed", err);
+          }
 
-        dataStream.merge(
-          result.toUIMessageStream({
-            sendReasoning: true,
-          })
-        );
+          writer.write({
+            type: "finish",
+          });
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : "Unknown stream error";
+          writer.write({ type: "error", errorText: errorMessage });
+          throw error;
+        }
       },
       generateId: generateUUID,
-      onFinish: async ({ messages }) => {
-        await saveMessages({
-          messages: messages.map((currentMessage) => ({
-            id: currentMessage.id,
-            role: currentMessage.role,
-            parts: currentMessage.parts,
-            createdAt: new Date(),
-            attachments: [],
-            chatId: id,
-          })),
-        });
+      onFinish: async () => {
+        if (streamedAssistantMessage) {
+          await saveMessages({
+            messages: [
+              {
+                id: streamedAssistantMessage.id,
+                role: "assistant",
+                parts: streamedAssistantMessage.parts,
+                createdAt: new Date(),
+                attachments: [],
+                chatId: id,
+              },
+            ],
+          });
+        }
 
         if (finalMergedUsage) {
           try {
@@ -273,22 +275,34 @@ export async function POST(request: Request) {
           }
         }
       },
-      onError: () => {
-        return "Oops, an error occurred!";
-      },
+      onError: () => "Oops, an error occurred!",
     });
 
-    // const streamContext = getStreamContext();
+    const streamContext = getStreamContext();
 
-    // if (streamContext) {
-    //   return new Response(
-    //     await streamContext.resumableStream(streamId, () =>
-    //       stream.pipeThrough(new JsonToSseTransformStream())
-    //     )
-    //   );
-    // }
+    if (streamContext) {
+      const resumable = await streamContext.resumableStream(streamId, () =>
+        stream.pipeThrough(new JsonToSseTransformStream())
+      );
 
-    return new Response(stream.pipeThrough(new JsonToSseTransformStream()));
+      if (resumable) {
+        return new Response(resumable, {
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            Connection: "keep-alive",
+          },
+        });
+      }
+    }
+
+    return new Response(stream.pipeThrough(new JsonToSseTransformStream()), {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      },
+    });
   } catch (error) {
     const vercelId = request.headers.get("x-vercel-id");
 
@@ -296,12 +310,10 @@ export async function POST(request: Request) {
       return error.toResponse();
     }
 
-    // Check for Vercel AI Gateway credit card error
     if (
       error instanceof Error &&
-      error.message?.includes(
-        "AI Gateway requires a valid credit card on file to service requests"
-      )
+      error.message?.includes("prompt_id") &&
+      error.message?.includes("not found")
     ) {
       return new ChatSDKError("bad_request:activate_gateway").toResponse();
     }
@@ -309,6 +321,146 @@ export async function POST(request: Request) {
     console.error("Unhandled error in chat API:", error, { vercelId });
     return new ChatSDKError("offline:chat").toResponse();
   }
+}
+
+type StreamOpenAIResponseArgs = {
+  model: string;
+  input: string;
+  metadata: Record<string, string>;
+  writer: UIMessageStreamWriter<ChatMessage>;
+};
+
+type StreamOpenAIResponseResult = {
+  text: string;
+  usage: Parameters<typeof mapResponsesUsageToLanguageModelUsage>[0];
+  modelId?: string;
+};
+
+async function streamOpenAIResponse({
+  model,
+  input,
+  metadata,
+  writer,
+}: StreamOpenAIResponseArgs): Promise<StreamOpenAIResponseResult> {
+  const responsesStream = await openai.responses.stream({
+    model,
+    input,
+    metadata,
+  });
+
+  const textTracker = createDeltaTracker("text", writer);
+  const reasoningTracker = createDeltaTracker("reasoning", writer);
+  let accumulatedText = "";
+
+  responsesStream.on("response.output_text.delta", (event: any) => {
+    const id = event.item_id ?? `text-${event.output_index}`;
+    if (typeof event.delta === "string" && event.delta.length > 0) {
+      textTracker.writeDelta(id, event.delta);
+      accumulatedText += event.delta;
+    }
+  });
+
+  responsesStream.on("response.output_text.done", (event: any) => {
+    const id = event.item_id ?? `text-${event.output_index}`;
+    textTracker.finish(id);
+  });
+
+  responsesStream.on("response.reasoning_text.delta", (event: any) => {
+    const id = event.item_id ?? `reasoning-${event.output_index}`;
+    if (typeof event.delta === "string" && event.delta.length > 0) {
+      reasoningTracker.writeDelta(id, event.delta);
+    }
+  });
+
+  responsesStream.on("response.reasoning_text.done", (event: any) => {
+    const id = event.item_id ?? `reasoning-${event.output_index}`;
+    reasoningTracker.finish(id);
+  });
+
+  responsesStream.on("event", (event: any) => {
+    if (
+      typeof event === "object" &&
+      event !== null &&
+      "type" in event &&
+      event.type === "response.error"
+    ) {
+      const message =
+        "error" in event && typeof event.error === "string"
+          ? event.error
+          : "OpenAI stream error";
+      writer.write({ type: "error", errorText: message });
+    }
+  });
+
+  const finalResponse = await responsesStream.finalResponse();
+
+  textTracker.finishAll();
+  reasoningTracker.finishAll();
+
+  return {
+    text: accumulatedText,
+    usage: (finalResponse as any)?.usage ?? null,
+    modelId: (finalResponse as any)?.model,
+  };
+}
+
+function createDeltaTracker(
+  kind: "text" | "reasoning",
+  writer: UIMessageStreamWriter<ChatMessage>
+) {
+  const states = new Map<string, { started: boolean; finished: boolean }>();
+
+  const ensureState = (id: string) => {
+    let state = states.get(id);
+    if (!state) {
+      state = { started: false, finished: false };
+      states.set(id, state);
+    }
+    return state;
+  };
+
+  return {
+    writeDelta: (id: string, delta: string) => {
+      const state = ensureState(id);
+      if (!state.started) {
+        if (kind === "text") {
+          writer.write({ type: "text-start", id });
+        } else {
+          writer.write({ type: "reasoning-start", id });
+        }
+        state.started = true;
+      }
+
+      if (kind === "text") {
+        writer.write({ type: "text-delta", id, delta });
+      } else {
+        writer.write({ type: "reasoning-delta", id, delta });
+      }
+    },
+    finish: (id: string) => {
+      const state = states.get(id);
+      if (state?.started && !state.finished) {
+        if (kind === "text") {
+          writer.write({ type: "text-end", id });
+        } else {
+          writer.write({ type: "reasoning-end", id });
+        }
+        state.finished = true;
+      }
+    },
+    finishAll: () => {
+      for (const [id, state] of states) {
+        if (state.started && !state.finished) {
+          if (kind === "text") {
+            writer.write({ type: "text-end", id });
+          } else {
+            writer.write({ type: "reasoning-end", id });
+          }
+          state.finished = true;
+        }
+      }
+    },
+  };
 }
 
 export async function DELETE(request: Request) {
