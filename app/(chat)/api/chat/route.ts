@@ -152,7 +152,6 @@ export async function POST(request: Request) {
     await createStreamId({ streamId, chatId: id });
 
     let finalMergedUsage: AppUsage | undefined;
-    let streamedAssistantMessage: ChatMessage | null = null;
 
     const stream = createUIMessageStream<ChatMessage>({
       execute: async ({ writer }) => {
@@ -193,21 +192,6 @@ export async function POST(request: Request) {
             assistantId: process.env.OPENAI_ASSISTANT_ID as string,
             writer,
           });
-
-          const assistantText = responseSummary.text;
-          if (assistantText?.length) {
-            streamedAssistantMessage = {
-              id: generateUUID(),
-              role: "assistant",
-              parts: [{ type: "text", text: assistantText }],
-            };
-
-            writer.write({
-              type: "data-appendMessage",
-              data: JSON.stringify(streamedAssistantMessage),
-              transient: true,
-            });
-          }
 
           const usageForFinish = mapResponsesUsageToLanguageModelUsage(
             responseSummary.usage
@@ -259,19 +243,21 @@ export async function POST(request: Request) {
         }
       },
       generateId: generateUUID,
-      onFinish: async () => {
-        if (streamedAssistantMessage) {
+      onFinish: async ({ messages }) => {
+        const assistantMessages = messages.filter(
+          (chatMessage) => chatMessage.role === "assistant"
+        );
+
+        if (assistantMessages.length > 0) {
           await saveMessages({
-            messages: [
-              {
-                id: streamedAssistantMessage.id,
-                role: "assistant",
-                parts: streamedAssistantMessage.parts,
-                createdAt: new Date(),
-                attachments: [],
-                chatId: id,
-              },
-            ],
+            messages: assistantMessages.map((currentMessage) => ({
+              id: currentMessage.id,
+              role: currentMessage.role,
+              parts: currentMessage.parts,
+              createdAt: new Date(),
+              attachments: [],
+              chatId: id,
+            })),
           });
         }
 
