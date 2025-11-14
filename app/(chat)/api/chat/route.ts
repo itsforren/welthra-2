@@ -25,6 +25,7 @@ import {
   updateChatLastContextById,
   updateChatOpenAIThreadId,
 } from "@/lib/db/queries";
+import { extractTextFromDocument } from "@/lib/documents";
 import { ChatSDKError } from "@/lib/errors";
 import { mapResponsesUsageToLanguageModelUsage } from "@/lib/openai";
 import type { ChatMessage } from "@/lib/types";
@@ -191,34 +192,57 @@ export async function POST(request: Request) {
             } => part.type === "text"
           );
 
-          const imageFileParts = message.parts
-            .filter(
-              (part) =>
-                part.type === "file" &&
-                typeof (part as any).mediaType === "string" &&
-                (part as any).mediaType.startsWith("image/")
-            )
-            .map((part) => {
-              const filePart = part as {
-                type: "file";
-                url: string;
-                name: string;
-                mediaType: string;
-              };
-              return {
-                type: "file" as const,
-                url: filePart.url,
-                name: filePart.name,
-                mediaType: filePart.mediaType,
-              };
-            });
+          const fileParts = message.parts.filter(
+            (part) => part.type === "file"
+          ) as {
+            type: "file";
+            url: string;
+            name: string;
+            mediaType: string;
+          }[];
+
+          const imageFileParts = fileParts.filter((part) =>
+            part.mediaType.startsWith("image/")
+          );
+
+          const documentFileParts = fileParts.filter(
+            (part) => !part.mediaType.startsWith("image/")
+          );
 
           const content: (TextContentPart | ImageURLContentPart)[] = [];
 
-          if (textParts.length > 0) {
+          let baseText =
+            textParts.length > 0
+              ? textParts.map((part) => part.text).join("\n")
+              : "";
+
+          if (documentFileParts.length > 0) {
+            const docsTextChunks = await Promise.all(
+              documentFileParts.map((doc) =>
+                extractTextFromDocument({
+                  url: doc.url,
+                  mediaType: doc.mediaType,
+                  name: doc.name,
+                })
+              )
+            );
+
+            const docsText = docsTextChunks
+              .map((chunk) => chunk.trim())
+              .filter((chunk) => chunk.length > 0)
+              .join("\n\n");
+
+            if (docsText.length > 0) {
+              baseText = baseText
+                ? `${baseText}\n\n[Attached documents]\n${docsText}`
+                : `[Attached documents]\n${docsText}`;
+            }
+          }
+
+          if (baseText.trim().length > 0) {
             content.push({
               type: "text",
-              text: textParts.map((part) => part.text).join("\n"),
+              text: baseText,
             });
           }
 
