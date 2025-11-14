@@ -1,41 +1,22 @@
 import type { LanguageModelV2 } from "@ai-sdk/provider";
-import { customProvider, type LanguageModel } from "ai";
-import type { Message } from "openai/resources/beta/threads/messages.mjs";
-import type { ResponseInput } from "openai/resources/responses/responses.mjs";
-import { openai } from "@/lib/server/openai";
+import type { LanguageModel } from "ai";
 
-import { isTestEnvironment } from "../constants";
 import {
   getModelConfig,
   mapResponsesUsageToLanguageModelUsage,
 } from "../openai";
+
+const trailingSlashRegex = /\/$/;
+const carriageReturnRegex = /\r/g;
+
+import { buildResponsesRequest } from "./provider/buildResponseRequest";
+import { extractTextFromResponse } from "./provider/extractTextFromResponse";
 
 type ModelId =
   | "chat-model"
   | "chat-model-reasoning"
   | "title-model"
   | "artifact-model";
-
-const testProvider = (() => {
-  if (!isTestEnvironment) {
-    return null;
-  }
-
-  const {
-    artifactModel,
-    chatModel,
-    reasoningModel,
-    titleModel,
-  } = require("./models.mock");
-  return customProvider({
-    languageModels: {
-      "chat-model": chatModel,
-      "chat-model-reasoning": reasoningModel,
-      "title-model": titleModel,
-      "artifact-model": artifactModel,
-    },
-  });
-})();
 
 const productionModels: Record<ModelId, LanguageModel> = {
   "chat-model": createOpenAiLanguageModel("chat-model"),
@@ -44,7 +25,10 @@ const productionModels: Record<ModelId, LanguageModel> = {
   "artifact-model": createOpenAiLanguageModel("artifact-model"),
 };
 
-export const myProvider = testProvider ?? {
+const PROVIDER_STREAM_MODE = "provider-stream";
+const PROVIDER_GENERATE_MODE = "provider-generate";
+
+export const myProvider = {
   languageModel(modelId: ModelId): LanguageModel {
     const model = productionModels[modelId];
     if (!model) {
@@ -65,85 +49,76 @@ function createOpenAiLanguageModel(modelId: ModelId): LanguageModelV2 {
     async doGenerate(options) {
       const request = buildResponsesRequest({ options, model });
 
-      const response = await openai.responses.create(request, {
+      const response = await fetch(getChatApiUrl(), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          mode: PROVIDER_GENERATE_MODE,
+          request,
+        }),
         signal: options.abortSignal,
+        cache: "no-store",
+        credentials: "include",
       });
 
-      const text = extractTextFromResponse(response);
+      if (!response.ok) {
+        throw await createApiError(response);
+      }
+
+      const data = (await response.json()) as ProviderGenerateResponse;
+      const text = extractTextFromResponse(data.response);
 
       return {
         content: text ? [{ type: "text", text }] : [],
         finishReason: "stop",
-        usage: mapResponsesUsageToLanguageModelUsage(response.usage),
+        usage: mapResponsesUsageToLanguageModelUsage(
+          (data.response as any)?.usage
+        ),
         warnings: [],
       };
     },
     async doStream(options: Parameters<LanguageModelV2["doStream"]>[0]) {
       const request = buildResponsesRequest({ options, model });
 
-      const responsesStream = await openai.responses.stream(request, {
+      const response = await fetch(getChatApiUrl(), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          mode: PROVIDER_STREAM_MODE,
+          request,
+        }),
         signal: options.abortSignal,
+        cache: "no-store",
+        credentials: "include",
       });
 
+      const body = response.body;
+
+      if (!response.ok || !body) {
+        throw await createApiError(response);
+      }
+
       const stream = new ReadableStream({
-        start(controller) {
-          controller.enqueue({ type: "stream-start", warnings: [] });
-
-          const textTracker = createStreamDeltaEmitter("text", controller);
-          const reasoningTracker = createStreamDeltaEmitter(
-            "reasoning",
-            controller
-          );
-
-          responsesStream.on("response.output_text.delta", (event) => {
-            const id = (event as any).item_id ?? `text-${event.output_index}`;
-            if (event.delta) {
-              textTracker.writeDelta(id, event.delta);
+        async start(controller) {
+          try {
+            for await (const event of parseEventStream(body)) {
+              controller.enqueue(event);
+              if (event?.type === "finish" || event?.type === "error") {
+                break;
+              }
             }
-          });
-
-          responsesStream.on("response.output_text.done", (event) => {
-            const id = (event as any).item_id ?? `text-${event.output_index}`;
-            textTracker.finish(id);
-          });
-
-          responsesStream.on("response.reasoning_text.delta", (event) => {
-            const id =
-              (event as any).item_id ?? `reasoning-${event.output_index}`;
-            if (event.delta) {
-              reasoningTracker.writeDelta(id, event.delta);
-            }
-          });
-
-          responsesStream.on("response.reasoning_text.done", (event) => {
-            const id =
-              (event as any).item_id ?? `reasoning-${event.output_index}`;
-            reasoningTracker.finish(id);
-          });
-
-          responsesStream.on("event", (event: any) => {
-            if (event.type === "response.error") {
-              controller.enqueue({ type: "error", error: event.error });
-            }
+          } catch (error) {
+            controller.enqueue({ type: "error", error });
+          } finally {
             controller.close();
-          });
-
-          responsesStream
-            .finalResponse()
-            .then((response) => {
-              textTracker.finishAll();
-              reasoningTracker.finishAll();
-              controller.enqueue({
-                type: "finish",
-                finishReason: "stop",
-                usage: mapResponsesUsageToLanguageModelUsage(response.usage),
-              });
-              controller.close();
-            })
-            .catch((error) => {
-              controller.enqueue({ type: "error", error });
-              controller.close();
-            });
+          }
+        },
+        cancel() {
+          body?.cancel();
         },
       });
 
@@ -152,162 +127,114 @@ function createOpenAiLanguageModel(modelId: ModelId): LanguageModelV2 {
   };
 }
 
-function buildResponsesRequest({
-  options,
-  model,
-}: {
-  options: Parameters<LanguageModelV2["doGenerate"]>[0];
-  model: string;
-}) {
-  const input = convertPromptToResponsesInput(
-    options.prompt as unknown as Message[]
-  );
+type ProviderGenerateResponse = {
+  response: unknown;
+};
 
-  const request: {
-    model: string;
-    input: ResponseInput;
-    temperature?: number;
-    max_output_tokens?: number;
-    stop?: string[];
-    response_format?: Record<string, unknown>;
-    prompt_id?: string;
-  } = {
-    model,
-    input,
-    temperature: options.temperature,
-    max_output_tokens: options.maxOutputTokens,
-    stop: options.stopSequences,
-  };
-
-  if (options.responseFormat?.type === "json") {
-    request.response_format = options.responseFormat.schema
-      ? {
-          type: "json_schema",
-          json_schema: {
-            name: options.responseFormat.name ?? "response",
-            schema: options.responseFormat.schema,
-          },
-        }
-      : { type: "json_object" };
+function getChatApiUrl() {
+  if (typeof window !== "undefined") {
+    return "/api/chat";
   }
 
-  return request;
+  const configuredBase =
+    process.env.NEXT_PUBLIC_APP_URL ||
+    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : undefined);
+
+  const baseUrl = configuredBase ?? "http://localhost:3000";
+
+  return `${baseUrl.replace(trailingSlashRegex, "")}/api/chat`;
 }
 
-function convertPromptToResponsesInput(prompt: Message[]): ResponseInput {
-  return prompt
-    .map((message: { role: string; content: any }) => {
-      if (message.role === "system") {
-        const systemText = Array.isArray(message.content)
-          ? message.content
-              .filter(
-                (part: { type?: string }) =>
-                  part.type === "text" && typeof (part as any).text === "string"
-              )
-              .map((part: any) => part.text as string)
-              .join("\n\n")
-          : String(message.content ?? "");
+async function createApiError(response: Response) {
+  let message = `Chat API request failed with status ${response.status}`;
 
-        if (!systemText) {
-          return null;
-        }
-
-        return {
-          role: "system",
-          content: [{ type: "input_text", text: systemText }],
-        };
+  try {
+    const data = await response.clone().json();
+    if (typeof data?.error === "string") {
+      message = data.error;
+    } else if (typeof data?.message === "string") {
+      message = data.message;
+    }
+  } catch {
+    try {
+      const text = await response.text();
+      if (text) {
+        message = text;
       }
-
-      const textParts =
-        Array.isArray(message.content) && message.content.length > 0
-          ? message.content
-              .filter(
-                (part: { type?: string }) =>
-                  part.type === "text" && typeof (part as any).text === "string"
-              )
-              .map((part: any) => ({
-                type: "input_text" as const,
-                text: part.text as string,
-              }))
-          : [];
-
-      if (!textParts.length) {
-        return null;
-      }
-
-      return {
-        role: message.role,
-        content: textParts,
-      };
-    })
-    .filter(Boolean) as ResponseInput;
-}
-
-function extractTextFromResponse(response: any) {
-  const output = Array.isArray(response?.output) ? response.output : [];
-  const chunks: string[] = [];
-
-  for (const item of output) {
-    if (item?.type === "message" && Array.isArray(item.content)) {
-      for (const content of item.content) {
-        if (
-          content?.type === "output_text" &&
-          typeof content.text === "string"
-        ) {
-          chunks.push(content.text);
-        }
-      }
+    } catch {
+      // ignore
     }
   }
 
-  return chunks.join("");
+  const error = new Error(message);
+  // Attach status for upstream handlers if needed
+  (error as any).status = response.status;
+  return error;
 }
 
-function createStreamDeltaEmitter(
-  kind: "text" | "reasoning",
-  controller: ReadableStreamDefaultController
-) {
-  const state = new Map<string, { started: boolean; finished: boolean }>();
+async function* parseEventStream(body: ReadableStream<Uint8Array>) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
 
-  const ensureState = (id: string) => {
-    let entry = state.get(id);
-    if (!entry) {
-      entry = { started: false, finished: false };
-      state.set(id, entry);
-    }
-    return entry;
-  };
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        buffer += decoder.decode();
+        break;
+      }
 
-  const startType = kind === "text" ? "text-start" : "reasoning-start";
-  const deltaType = kind === "text" ? "text-delta" : "reasoning-delta";
-  const endType = kind === "text" ? "text-end" : "reasoning-end";
+      buffer += decoder.decode(value, { stream: true });
 
-  return {
-    writeDelta(id: string, delta: string) {
-      if (!delta) {
-        return;
-      }
-      const entry = ensureState(id);
-      if (!entry.started) {
-        controller.enqueue({ type: startType, id });
-        entry.started = true;
-      }
-      controller.enqueue({ type: deltaType, id, delta });
-    },
-    finish(id: string) {
-      const entry = state.get(id);
-      if (entry?.started && !entry.finished) {
-        controller.enqueue({ type: endType, id });
-        entry.finished = true;
-      }
-    },
-    finishAll() {
-      for (const [id, entry] of state.entries()) {
-        if (entry.started && !entry.finished) {
-          controller.enqueue({ type: endType, id });
-          entry.finished = true;
+      while (true) {
+        const separatorIndex = buffer.indexOf("\n\n");
+        if (separatorIndex === -1) {
+          break;
+        }
+
+        const chunk = buffer.slice(0, separatorIndex);
+        buffer = buffer.slice(separatorIndex + 2);
+
+        const data = extractEventData(chunk);
+        if (!data) {
+          continue;
+        }
+
+        try {
+          yield JSON.parse(data);
+        } catch {
+          console.error("Malformed event", data);
         }
       }
-    },
-  };
+    }
+
+    const remaining = buffer.trim();
+    if (remaining.length > 0) {
+      const data = extractEventData(remaining);
+      if (data) {
+        try {
+          yield JSON.parse(data);
+        } catch {
+          console.error("Malformed trailing event", remaining);
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function extractEventData(chunk: string) {
+  const normalized = chunk.replace(carriageReturnRegex, "");
+  const dataLines = normalized
+    .split("\n")
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trim());
+
+  if (dataLines.length === 0) {
+    return null;
+  }
+
+  return dataLines.join("\n");
 }

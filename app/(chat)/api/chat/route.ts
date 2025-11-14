@@ -1,5 +1,3 @@
-// app/api/chat/route.ts
-
 import { geolocation } from "@vercel/functions";
 import {
   createUIMessageStream,
@@ -8,6 +6,7 @@ import {
 } from "ai";
 import { unstable_cache as cache } from "next/cache";
 import { after } from "next/server";
+import OpenAI from "openai";
 import {
   createResumableStreamContext,
   type ResumableStreamContext,
@@ -35,17 +34,23 @@ import {
   getModelConfig,
   mapResponsesUsageToLanguageModelUsage,
 } from "@/lib/openai";
-import { openai } from "@/lib/server/openai";
-
 import type { ChatMessage } from "@/lib/types";
 import type { AppUsage } from "@/lib/usage";
 import { convertToUIMessages, generateUUID } from "@/lib/utils";
 import { generateTitleFromUserMessage } from "../../actions";
 import { type PostRequestBody, postRequestBodySchema } from "./schema";
 
-export const maxDuration = 60;
+export const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 let globalStreamContext: ResumableStreamContext | null = null;
+
+const SSE_HEADERS = {
+  "Content-Type": "text/event-stream",
+  "Cache-Control": "no-cache",
+  Connection: "keep-alive",
+} as const;
 
 const getTokenlensCatalog = cache(
   async (): Promise<ModelCatalog | undefined> => {
@@ -79,11 +84,22 @@ export function getStreamContext() {
 }
 
 export async function POST(request: Request) {
+  let parsedBody: unknown;
+
+  try {
+    parsedBody = await request.json();
+  } catch (_) {
+    return new ChatSDKError("bad_request:api").toResponse();
+  }
+
+  if (isProviderProxyRequest(parsedBody)) {
+    return handleProviderProxyRequest(parsedBody);
+  }
+
   let requestBody: PostRequestBody;
 
   try {
-    const json = await request.json();
-    requestBody = postRequestBodySchema.parse(json);
+    requestBody = postRequestBodySchema.parse(parsedBody);
   } catch (_) {
     return new ChatSDKError("bad_request:api").toResponse();
   }
@@ -278,7 +294,7 @@ export async function POST(request: Request) {
       onError: () => "Oops, an error occurred!",
     });
 
-    const streamContext = getStreamContext();
+    const streamContext = await getStreamContext();
 
     if (streamContext) {
       const resumable = await streamContext.resumableStream(streamId, () =>
@@ -287,21 +303,13 @@ export async function POST(request: Request) {
 
       if (resumable) {
         return new Response(resumable, {
-          headers: {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            Connection: "keep-alive",
-          },
+          headers: SSE_HEADERS,
         });
       }
     }
 
     return new Response(stream.pipeThrough(new JsonToSseTransformStream()), {
-      headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-      },
+      headers: SSE_HEADERS,
     });
   } catch (error) {
     const vercelId = request.headers.get("x-vercel-id");
@@ -457,6 +465,173 @@ function createDeltaTracker(
             writer.write({ type: "reasoning-end", id });
           }
           state.finished = true;
+        }
+      }
+    },
+  };
+}
+
+type ProviderProxyRequest = {
+  mode: "provider-stream" | "provider-generate";
+  request: Record<string, unknown>;
+};
+
+function isProviderProxyRequest(
+  payload: unknown
+): payload is ProviderProxyRequest {
+  if (!payload || typeof payload !== "object") {
+    return false;
+  }
+
+  const maybePayload = payload as Record<string, unknown>;
+  const mode = maybePayload.mode;
+
+  if (mode === "provider-stream" || mode === "provider-generate") {
+    const request = maybePayload.request;
+    return typeof request === "object" && request !== null;
+  }
+
+  return false;
+}
+
+function handleProviderProxyRequest(payload: ProviderProxyRequest) {
+  if (payload.mode === "provider-stream") {
+    return streamProviderResponse(payload.request);
+  }
+
+  return generateProviderResponse(payload.request);
+}
+
+async function streamProviderResponse(requestPayload: Record<string, unknown>) {
+  try {
+    const responsesStream = await openai.responses.stream(
+      requestPayload as any
+    );
+
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue({ type: "stream-start", warnings: [] });
+
+        const textTracker = createStreamDeltaEmitter("text", controller);
+        const reasoningTracker = createStreamDeltaEmitter(
+          "reasoning",
+          controller
+        );
+
+        responsesStream.on("response.output_text.delta", (event: any) => {
+          const id = event.item_id ?? `text-${event.output_index}`;
+          if (event.delta) {
+            textTracker.writeDelta(id, event.delta);
+          }
+        });
+
+        responsesStream.on("response.output_text.done", (event: any) => {
+          const id = event.item_id ?? `text-${event.output_index}`;
+          textTracker.finish(id);
+        });
+
+        responsesStream.on("response.reasoning_text.delta", (event: any) => {
+          const id = event.item_id ?? `reasoning-${event.output_index}`;
+          if (event.delta) {
+            reasoningTracker.writeDelta(id, event.delta);
+          }
+        });
+
+        responsesStream.on("response.reasoning_text.done", (event: any) => {
+          const id = event.item_id ?? `reasoning-${event.output_index}`;
+          reasoningTracker.finish(id);
+        });
+
+        responsesStream.on("event", (event: any) => {
+          if (event?.type === "response.error") {
+            controller.enqueue({ type: "error", error: event.error });
+          }
+          controller.close();
+        });
+
+        responsesStream
+          .finalResponse()
+          .then((response) => {
+            textTracker.finishAll();
+            reasoningTracker.finishAll();
+            controller.enqueue({
+              type: "finish",
+              finishReason: "stop",
+              usage: mapResponsesUsageToLanguageModelUsage(response.usage),
+            });
+            controller.close();
+          })
+          .catch((error) => {
+            controller.enqueue({ type: "error", error });
+            controller.close();
+          });
+      },
+    });
+
+    return new Response(stream.pipeThrough(new JsonToSseTransformStream()), {
+      headers: SSE_HEADERS,
+    });
+  } catch (error) {
+    console.error("Provider stream proxy failed", error);
+    return new ChatSDKError("offline:chat").toResponse();
+  }
+}
+
+async function generateProviderResponse(
+  requestPayload: Record<string, unknown>
+) {
+  try {
+    const response = await openai.responses.create(requestPayload as any);
+    return Response.json({ response }, { status: 200 });
+  } catch (error) {
+    console.error("Provider generate proxy failed", error);
+    return new ChatSDKError("offline:chat").toResponse();
+  }
+}
+
+function createStreamDeltaEmitter(
+  kind: "text" | "reasoning",
+  controller: ReadableStreamDefaultController
+) {
+  const state = new Map<string, { started: boolean; finished: boolean }>();
+
+  const ensureState = (id: string) => {
+    let entry = state.get(id);
+    if (!entry) {
+      entry = { started: false, finished: false };
+      state.set(id, entry);
+    }
+    return entry;
+  };
+
+  const startType = kind === "text" ? "text-start" : "reasoning-start";
+  const deltaType = kind === "text" ? "text-delta" : "reasoning-delta";
+  const endType = kind === "text" ? "text-end" : "reasoning-end";
+
+  return {
+    writeDelta(id: string, delta: string) {
+      if (!delta) {
+        return;
+      }
+      const entry = ensureState(id);
+      if (!entry.started) {
+        controller.enqueue({ type: startType, id });
+        entry.started = true;
+      }
+      controller.enqueue({ type: deltaType, id, delta });
+    },
+    finish(id: string) {
+      const entry = state.get(id);
+      if (entry?.started && !entry.finished) {
+        controller.enqueue({ type: endType, id });
+        entry.finished = true;
+      }
+    },
+    finishAll() {
+      for (const [id, entry] of state.entries()) {
+        if (entry.started && !entry.finished) {
+          controller.enqueue({ type: endType, id });
+          entry.finished = true;
         }
       }
     },
