@@ -17,7 +17,7 @@ export async function GET(
 ) {
   const { id: chatId } = await params;
 
-  const streamContext = getStreamContext();
+  const streamContext = await getStreamContext();
   const resumeRequestedAt = new Date();
 
   if (!streamContext) {

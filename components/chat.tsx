@@ -66,6 +66,7 @@ export function Chat({
 
   useEffect(() => {
     currentModelIdRef.current = currentModelId;
+    console.log("currentModelId", setCurrentModelId);
   }, [currentModelId]);
 
   const {
@@ -182,7 +183,6 @@ export function Chat({
               chatId={id}
               input={input}
               messages={messages}
-              onModelChange={setCurrentModelId}
               selectedModelId={currentModelId}
               selectedVisibilityType={visibilityType}
               sendMessage={sendMessage}

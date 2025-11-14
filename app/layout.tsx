@@ -8,8 +8,8 @@ import { SessionProvider } from "next-auth/react";
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://chat.vercel.ai"),
-  title: "Next.js Chatbot Template",
-  description: "Next.js chatbot template using the AI SDK.",
+  title: "Welthra - Your Personal AI Financial Assistant",
+  description: "Welthra is your personal AI financial assistant. It helps you manage your finances, track your spending, and make informed decisions about your money.",
 };
 
 export const viewport = {
