@@ -5,9 +5,19 @@ const textPartSchema = z.object({
   text: z.string().min(1).max(2000),
 });
 
+const supportedMediaTypes = [
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document", // .docx
+  "text/csv",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", // .xlsx
+] as const;
+
 const filePartSchema = z.object({
   type: z.enum(["file"]),
-  mediaType: z.enum(["image/jpeg", "image/png"]),
+  mediaType: z.enum(supportedMediaTypes),
   name: z.string().min(1).max(100),
   url: z.string().url(),
 });

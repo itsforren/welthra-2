@@ -4,17 +4,35 @@ import { z } from "zod";
 
 import { auth } from "@/app/(auth)/auth";
 
+const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10MB
+
+const ALLOWED_MIME_TYPES = [
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document", // .docx
+  "text/csv",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", // .xlsx
+] as const;
+
 // Use Blob instead of File since File is not available in Node.js environment
 const FileSchema = z.object({
   file: z
     .instanceof(Blob)
-    .refine((file) => file.size <= 5 * 1024 * 1024, {
-      message: "File size should be less than 5MB",
+    .refine((file) => file.size <= MAX_FILE_SIZE_BYTES, {
+      message: "File size should be less than 10MB",
     })
-    // Update the file type based on the kind of files you want to accept
-    .refine((file) => ["image/jpeg", "image/png"].includes(file.type), {
-      message: "File type should be JPEG or PNG",
-    }),
+    .refine(
+      (file) =>
+        ALLOWED_MIME_TYPES.includes(
+          file.type as (typeof ALLOWED_MIME_TYPES)[number]
+        ),
+      {
+        message:
+          "Unsupported file type. Allowed types: docx, pdf, csv, xlsx, png, jpg, webp",
+      }
+    ),
 });
 
 export async function POST(request: Request) {

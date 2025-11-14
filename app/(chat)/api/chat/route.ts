@@ -33,6 +33,19 @@ import { generateUUID } from "@/lib/utils";
 import { generateTitleFromUserMessage } from "../../actions";
 import { type PostRequestBody, postRequestBodySchema } from "./schema";
 
+type TextContentPart = {
+  type: "text";
+  text: string;
+};
+
+type ImageURLContentPart = {
+  type: "image_url";
+  image_url: {
+    url: string;
+    detail?: "auto" | "low" | "high";
+  };
+};
+
 export const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -169,21 +182,59 @@ export async function POST(request: Request) {
             await updateChatOpenAIThreadId({ chatId: id, threadId });
           }
 
-          const textContent = message.parts
+          const textParts = message.parts.filter(
+            (
+              part
+            ): part is {
+              type: "text";
+              text: string;
+            } => part.type === "text"
+          );
+
+          const imageFileParts = message.parts
             .filter(
-              (
-                part
-              ): part is {
-                type: "text";
-                text: string;
-              } => part.type === "text"
+              (part) =>
+                part.type === "file" &&
+                typeof (part as any).mediaType === "string" &&
+                (part as any).mediaType.startsWith("image/")
             )
-            .map((part) => part.text)
-            .join("\n");
+            .map((part) => {
+              const filePart = part as {
+                type: "file";
+                url: string;
+                name: string;
+                mediaType: string;
+              };
+              return {
+                type: "file" as const,
+                url: filePart.url,
+                name: filePart.name,
+                mediaType: filePart.mediaType,
+              };
+            });
+
+          const content: (TextContentPart | ImageURLContentPart)[] = [];
+
+          if (textParts.length > 0) {
+            content.push({
+              type: "text",
+              text: textParts.map((part) => part.text).join("\n"),
+            });
+          }
+
+          for (const imagePart of imageFileParts) {
+            content.push({
+              type: "image_url",
+              image_url: {
+                url: imagePart.url,
+                detail: "auto",
+              },
+            });
+          }
 
           await openai.beta.threads.messages.create(threadId, {
             role: "user",
-            content: textContent,
+            content,
           });
 
           // STREAM DEL ASSISTANT
