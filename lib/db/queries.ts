@@ -521,6 +521,24 @@ export async function updateChatLastContextById({
   }
 }
 
+export async function updateChatOpenAIThreadId({
+  chatId,
+  threadId,
+}: {
+  chatId: string;
+  threadId: string;
+}) {
+  try {
+    return await db
+      .update(chat)
+      .set({ openaiThreadId: threadId })
+      .where(eq(chat.id, chatId));
+  } catch (error) {
+    console.warn("Failed to update OpenAI thread id for chat", chatId, error);
+    return;
+  }
+}
+
 export async function getMessageCountByUserId({
   id,
   differenceInHours,

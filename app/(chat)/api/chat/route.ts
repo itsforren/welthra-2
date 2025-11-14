@@ -1,4 +1,3 @@
-import { geolocation } from "@vercel/functions";
 import {
   createUIMessageStream,
   JsonToSseTransformStream,
@@ -16,27 +15,21 @@ import { fetchModels } from "tokenlens/fetch";
 import { getUsage } from "tokenlens/helpers";
 import { auth, type UserType } from "@/app/(auth)/auth";
 import { entitlementsByUserType } from "@/lib/ai/entitlements";
-import { type RequestHints, systemPrompt } from "@/lib/ai/prompts";
 import {
   createStreamId,
   deleteChatById,
   getChatById,
   getMessageCountByUserId,
-  getMessagesByChatId,
   saveChat,
   saveMessages,
   updateChatLastContextById,
+  updateChatOpenAIThreadId,
 } from "@/lib/db/queries";
-import type { DBMessage } from "@/lib/db/schema";
 import { ChatSDKError } from "@/lib/errors";
-import {
-  buildResponsesInput,
-  getModelConfig,
-  mapResponsesUsageToLanguageModelUsage,
-} from "@/lib/openai";
+import { mapResponsesUsageToLanguageModelUsage } from "@/lib/openai";
 import type { ChatMessage } from "@/lib/types";
 import type { AppUsage } from "@/lib/usage";
-import { convertToUIMessages, generateUUID } from "@/lib/utils";
+import { generateUUID } from "@/lib/utils";
 import { generateTitleFromUserMessage } from "../../actions";
 import { type PostRequestBody, postRequestBodySchema } from "./schema";
 
@@ -84,6 +77,7 @@ export function getStreamContext() {
 }
 
 export async function POST(request: Request) {
+  console.log("🔥 CHAT API CALLED");
   let parsedBody: unknown;
 
   try {
@@ -105,8 +99,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const { id, message, selectedChatModel, selectedVisibilityType } =
-      requestBody;
+    const { id, message, selectedVisibilityType } = requestBody;
 
     const session = await auth();
 
@@ -126,13 +119,11 @@ export async function POST(request: Request) {
     }
 
     const chat = await getChatById({ id });
-    let messagesFromDb: DBMessage[] = [];
 
     if (chat) {
       if (chat.userId !== session.user.id) {
         return new ChatSDKError("forbidden:chat").toResponse();
       }
-      messagesFromDb = await getMessagesByChatId({ id });
     } else {
       const title = await generateTitleFromUserMessage({ message });
 
@@ -143,17 +134,6 @@ export async function POST(request: Request) {
         visibility: selectedVisibilityType,
       });
     }
-
-    const uiMessages = [...convertToUIMessages(messagesFromDb), message];
-
-    const { longitude, latitude, city, country } = geolocation(request);
-
-    const requestHints: RequestHints = {
-      longitude,
-      latitude,
-      city,
-      country,
-    };
 
     await saveMessages({
       messages: [
@@ -171,31 +151,46 @@ export async function POST(request: Request) {
     const streamId = generateUUID();
     await createStreamId({ streamId, chatId: id });
 
-    const { model } = getModelConfig(selectedChatModel);
-
-    const responsesInput = buildResponsesInput({
-      messages: uiMessages,
-      systemPrompt: systemPrompt({
-        selectedChatModel,
-        requestHints,
-      }),
-    });
-
     let finalMergedUsage: AppUsage | undefined;
     let streamedAssistantMessage: ChatMessage | null = null;
 
     const stream = createUIMessageStream<ChatMessage>({
       execute: async ({ writer }) => {
         try {
+          console.log("🔥 CHAT EXECUTE CALLED");
           writer.write({ type: "start" });
 
+          let threadId: string;
+
+          if (chat?.openaiThreadId) {
+            threadId = chat.openaiThreadId;
+          } else {
+            const thread = await openai.beta.threads.create();
+            threadId = thread.id;
+            await updateChatOpenAIThreadId({ chatId: id, threadId });
+          }
+
+          const textContent = message.parts
+            .filter(
+              (
+                part
+              ): part is {
+                type: "text";
+                text: string;
+              } => part.type === "text"
+            )
+            .map((part) => part.text)
+            .join("\n");
+
+          await openai.beta.threads.messages.create(threadId, {
+            role: "user",
+            content: textContent,
+          });
+
+          // STREAM DEL ASSISTANT
           const responseSummary = await streamOpenAIResponse({
-            model,
-            input: responsesInput,
-            metadata: {
-              chatId: id,
-              userId: session.user.id,
-            },
+            threadId,
+            assistantId: process.env.OPENAI_ASSISTANT_ID as string,
             writer,
           });
 
@@ -331,149 +326,142 @@ export async function POST(request: Request) {
   }
 }
 
-type StreamOpenAIResponseArgs = {
-  model: string;
-  input: string;
-  metadata: Record<string, string>;
-  writer: UIMessageStreamWriter<ChatMessage>;
-};
-
-type StreamOpenAIResponseResult = {
-  text: string;
-  usage: Parameters<typeof mapResponsesUsageToLanguageModelUsage>[0];
-  modelId?: string;
-};
-
 async function streamOpenAIResponse({
-  model,
-  input,
-  metadata,
+  threadId,
+  assistantId,
   writer,
-}: StreamOpenAIResponseArgs): Promise<StreamOpenAIResponseResult> {
-  const responsesStream = await openai.responses.stream({
-    model,
-    input,
-    metadata,
+}: {
+  threadId: string;
+  assistantId: string;
+  writer: UIMessageStreamWriter<ChatMessage>;
+}) {
+  const runStream = await openai.beta.threads.runs.stream(threadId, {
+    assistant_id: assistantId,
+    stream: true,
   });
 
-  const textTracker = createDeltaTracker("text", writer);
-  const reasoningTracker = createDeltaTracker("reasoning", writer);
-  let accumulatedText = "";
-
-  responsesStream.on("response.output_text.delta", (event: any) => {
-    const id = event.item_id ?? `text-${event.output_index}`;
-    if (typeof event.delta === "string" && event.delta.length > 0) {
-      textTracker.writeDelta(id, event.delta);
-      accumulatedText += event.delta;
-    }
-  });
-
-  responsesStream.on("response.output_text.done", (event: any) => {
-    const id = event.item_id ?? `text-${event.output_index}`;
-    textTracker.finish(id);
-  });
-
-  responsesStream.on("response.reasoning_text.delta", (event: any) => {
-    const id = event.item_id ?? `reasoning-${event.output_index}`;
-    if (typeof event.delta === "string" && event.delta.length > 0) {
-      reasoningTracker.writeDelta(id, event.delta);
-    }
-  });
-
-  responsesStream.on("response.reasoning_text.done", (event: any) => {
-    const id = event.item_id ?? `reasoning-${event.output_index}`;
-    reasoningTracker.finish(id);
-  });
-
-  responsesStream.on("event", (event: any) => {
-    if (
-      typeof event === "object" &&
-      event !== null &&
-      "type" in event &&
-      event.type === "response.error"
-    ) {
-      const message =
-        "error" in event && typeof event.error === "string"
-          ? event.error
-          : "OpenAI stream error";
-      writer.write({ type: "error", errorText: message });
-    }
-  });
-
-  const finalResponse = await responsesStream.finalResponse();
-
-  textTracker.finishAll();
-  reasoningTracker.finishAll();
-
-  return {
-    text: accumulatedText,
-    usage: (finalResponse as any)?.usage ?? null,
-    modelId: (finalResponse as any)?.model,
-  };
-}
-
-function createDeltaTracker(
-  kind: "text" | "reasoning",
-  writer: UIMessageStreamWriter<ChatMessage>
-) {
-  const states = new Map<string, { started: boolean; finished: boolean }>();
+  const messageStates = new Map<
+    string,
+    { started: boolean; accumulated: string }
+  >();
+  let lastMessageId: string | null = null;
 
   const ensureState = (id: string) => {
-    let state = states.get(id);
+    let state = messageStates.get(id);
     if (!state) {
-      state = { started: false, finished: false };
-      states.set(id, state);
+      state = { started: false, accumulated: "" };
+      messageStates.set(id, state);
     }
     return state;
   };
 
-  return {
-    writeDelta: (id: string, delta: string) => {
-      const state = ensureState(id);
-      if (!state.started) {
-        if (kind === "text") {
-          writer.write({ type: "text-start", id });
-        } else {
-          writer.write({ type: "reasoning-start", id });
-        }
-        state.started = true;
-      }
-
-      if (kind === "text") {
-        writer.write({ type: "text-delta", id, delta });
-      } else {
-        writer.write({ type: "reasoning-delta", id, delta });
-      }
-    },
-    finish: (id: string) => {
-      const state = states.get(id);
-      if (state?.started && !state.finished) {
-        if (kind === "text") {
-          writer.write({ type: "text-end", id });
-        } else {
-          writer.write({ type: "reasoning-end", id });
-        }
-        state.finished = true;
-      }
-    },
-    finishAll: () => {
-      for (const [id, state] of states) {
-        if (state.started && !state.finished) {
-          if (kind === "text") {
-            writer.write({ type: "text-end", id });
-          } else {
-            writer.write({ type: "reasoning-end", id });
-          }
-          state.finished = true;
-        }
-      }
-    },
+  const startMessageIfNeeded = (id: string) => {
+    const state = ensureState(id);
+    if (!state.started) {
+      writer.write({ type: "text-start", id });
+      state.started = true;
+    }
+    return state;
   };
+
+  try {
+    for await (const event of runStream as any as AsyncIterable<any>) {
+      switch (event?.event) {
+        case "thread.message.delta": {
+          const messageId = event.data?.id ?? "assistant";
+          lastMessageId = messageId;
+          const state = startMessageIfNeeded(messageId);
+          const deltas: any[] = event.data?.delta?.content ?? [];
+
+          for (const content of deltas) {
+            const textValue =
+              typeof content?.text?.value === "string"
+                ? content.text.value
+                : undefined;
+
+            if (!textValue) {
+              continue;
+            }
+
+            writer.write({
+              type: "text-delta",
+              id: messageId,
+              delta: textValue,
+            });
+            state.accumulated += textValue;
+          }
+          break;
+        }
+        case "thread.message.completed": {
+          const messageId = event.data?.id ?? "assistant";
+          const state = messageStates.get(messageId);
+          if (state?.started) {
+            writer.write({ type: "text-end", id: messageId });
+            state.started = false;
+          }
+          break;
+        }
+        case "thread.run.completed": {
+          // handled after loop via finalRun call
+          break;
+        }
+        case "thread.run.failed":
+        case "thread.run.cancelled":
+        case "thread.run.expired": {
+          writer.write({
+            type: "error",
+            errorText:
+              event?.data?.last_error?.message ??
+              "Assistant run failed unexpectedly",
+          });
+          throw new Error(
+            event?.data?.last_error?.message ??
+              `Assistant run ended with status: ${event.event}`
+          );
+        }
+        default: {
+          // Ignore other events (tool calls, etc.) for now
+          break;
+        }
+      }
+    }
+
+    const unfinishedState =
+      lastMessageId && messageStates.get(lastMessageId)?.started
+        ? messageStates.get(lastMessageId)
+        : null;
+
+    if (unfinishedState && lastMessageId) {
+      writer.write({ type: "text-end", id: lastMessageId });
+      unfinishedState.started = false;
+    }
+
+    const finalRun = await (runStream as any).finalRun();
+    const finalState = lastMessageId
+      ? messageStates.get(lastMessageId)
+      : messageStates.values().next().value;
+
+    return {
+      text: finalState?.accumulated ?? "",
+      modelId: finalRun?.model,
+      usage: finalRun?.usage,
+    };
+  } catch (error) {
+    if (error instanceof Error) {
+      writer.write({ type: "error", errorText: error.message });
+    } else {
+      writer.write({
+        type: "error",
+        errorText: "Unknown assistant stream error",
+      });
+    }
+    throw error;
+  }
 }
 
 type ProviderProxyRequest = {
   mode: "provider-stream" | "provider-generate";
-  request: Record<string, unknown>;
+  request?: Record<string, unknown>;
 };
 
 function isProviderProxyRequest(
@@ -496,17 +484,18 @@ function isProviderProxyRequest(
 
 function handleProviderProxyRequest(payload: ProviderProxyRequest) {
   if (payload.mode === "provider-stream") {
-    return streamProviderResponse(payload.request);
+    return streamProviderResponse(payload.request as Record<string, unknown>);
   }
 
-  return generateProviderResponse(payload.request);
+  return generateProviderResponse(payload.request as Record<string, unknown>);
 }
 
 async function streamProviderResponse(requestPayload: Record<string, unknown>) {
   try {
-    const responsesStream = await openai.responses.stream(
-      requestPayload as any
-    );
+    const responsesStream = await openai.responses.stream({
+      ...(requestPayload as any),
+      prompt_id: process.env.OPENAI_PROMPT_ID,
+    });
 
     const stream = new ReadableStream({
       start(controller) {
@@ -546,7 +535,6 @@ async function streamProviderResponse(requestPayload: Record<string, unknown>) {
           if (event?.type === "response.error") {
             controller.enqueue({ type: "error", error: event.error });
           }
-          controller.close();
         });
 
         responsesStream

@@ -1,0 +1,1 @@
+ALTER TABLE "Chat" ADD COLUMN "openaiThreadId" varchar(255);
