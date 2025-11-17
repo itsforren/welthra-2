@@ -23,6 +23,7 @@ import {
   SidebarMenu,
   useSidebar,
 } from "@/components/ui/sidebar";
+import Logo from "@/public/images/logo.png";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -76,7 +77,7 @@ export function AppSidebar({ user }: { user: User | undefined }) {
                   className="h-8 w-8"
                   height={32}
                   priority
-                  src="/images/logo.png"
+                  src={Logo}
                   width={32}
                 />
                 <span className="cursor-pointer rounded-md px-2 font-semibold text-lg hover:bg-muted">

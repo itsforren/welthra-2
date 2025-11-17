@@ -58,8 +58,6 @@ export function Chat({
 
   const { data: session } = useSession();
 
-  console.log("session", session);
-
   const { mutate } = useSWRConfig();
   const { setDataStream } = useDataStream();
 
