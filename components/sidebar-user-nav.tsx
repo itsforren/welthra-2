@@ -18,6 +18,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
+import { useSubscriptionStatus } from "@/hooks/use-subscription-status";
 import { guestRegex } from "@/lib/constants";
 import { LoaderIcon } from "./icons";
 import { toast } from "./toast";
@@ -28,6 +29,35 @@ export function SidebarUserNav({ user }: { user: User }) {
   const { setTheme, resolvedTheme } = useTheme();
 
   const isGuest = guestRegex.test(data?.user?.email ?? "");
+
+  const { isActive: hasActiveSubscription } = useSubscriptionStatus();
+
+  const handleCancelSubscription = async () => {
+    try {
+      const response = await fetch("/api/subscription/cancel", {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        toast({
+          type: "error",
+          description: "Failed to cancel subscription. Please try again.",
+        });
+        return;
+      }
+
+      toast({
+        type: "success",
+        description:
+          "Your subscription will be cancelled at the end of the current period.",
+      });
+    } catch {
+      toast({
+        type: "error",
+        description: "Unexpected error while cancelling subscription.",
+      });
+    }
+  };
 
   return (
     <SidebarMenu>
@@ -70,6 +100,16 @@ export function SidebarUserNav({ user }: { user: User }) {
             data-testid="user-nav-menu"
             side="top"
           >
+            {hasActiveSubscription && (
+              <DropdownMenuItem
+                className="cursor-pointer"
+                data-testid="user-nav-item-cancel-subscription"
+                onSelect={handleCancelSubscription}
+              >
+                Cancel Subscription
+              </DropdownMenuItem>
+            )}
+
             <DropdownMenuItem
               className="cursor-pointer"
               data-testid="user-nav-item-theme"

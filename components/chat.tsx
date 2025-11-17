@@ -3,6 +3,7 @@
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { useSearchParams } from "next/navigation";
+import { signOut } from "next-auth/react";
 import { useEffect, useRef, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import { unstable_serialize } from "swr/infinite";
@@ -10,7 +11,6 @@ import { ChatHeader } from "@/components/chat-header";
 import {
   AlertDialog,
   AlertDialogAction,
-  AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
   AlertDialogFooter,
@@ -20,6 +20,7 @@ import {
 import { useArtifactSelector } from "@/hooks/use-artifact";
 import { useAutoResume } from "@/hooks/use-auto-resume";
 import { useChatVisibility } from "@/hooks/use-chat-visibility";
+import { useSubscriptionStatus } from "@/hooks/use-subscription-status";
 import type { Vote } from "@/lib/db/schema";
 import { ChatSDKError } from "@/lib/errors";
 import type { Attachment, ChatMessage } from "@/lib/types";
@@ -60,13 +61,14 @@ export function Chat({
 
   const [input, setInput] = useState<string>("");
   const [usage, setUsage] = useState<AppUsage | undefined>(initialLastContext);
-  const [showCreditCardAlert, setShowCreditCardAlert] = useState(false);
-  const [currentModelId, setCurrentModelId] = useState(initialChatModel);
+  const [currentModelId] = useState(initialChatModel);
   const currentModelIdRef = useRef(currentModelId);
+
+  const { isActive: hasActiveSubscription, isLoading: isSubscriptionLoading } =
+    useSubscriptionStatus();
 
   useEffect(() => {
     currentModelIdRef.current = currentModelId;
-    console.log("currentModelId", setCurrentModelId);
   }, [currentModelId]);
 
   const {
@@ -108,17 +110,10 @@ export function Chat({
     },
     onError: (error) => {
       if (error instanceof ChatSDKError) {
-        // Check if it's a credit card error
-        if (
-          error.message?.includes("AI Gateway requires a valid credit card")
-        ) {
-          setShowCreditCardAlert(true);
-        } else {
-          toast({
-            type: "error",
-            description: error.message,
-          });
-        }
+        toast({
+          type: "error",
+          description: error.message,
+        });
       }
     },
   });
@@ -180,6 +175,7 @@ export function Chat({
           {!isReadonly && (
             <MultimodalInput
               attachments={attachments}
+              canUseAI={!isSubscriptionLoading && hasActiveSubscription}
               chatId={id}
               input={input}
               messages={messages}
@@ -215,31 +211,25 @@ export function Chat({
         votes={votes}
       />
 
-      <AlertDialog
-        onOpenChange={setShowCreditCardAlert}
-        open={showCreditCardAlert}
-      >
+      <AlertDialog open={!hasActiveSubscription && !isSubscriptionLoading}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Activate AI Gateway</AlertDialogTitle>
+            <AlertDialogTitle>Activate your plan</AlertDialogTitle>
             <AlertDialogDescription>
-              This application requires{" "}
-              {process.env.NODE_ENV === "production" ? "the owner" : "you"} to
-              activate Vercel AI Gateway.
+              To use the AI assistant you need an active Welthra subscription.
+              Complete your subscription and then return here to continue.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => signOut({ redirect: true })}>
+              Logout
+            </AlertDialogAction>
             <AlertDialogAction
               onClick={() => {
-                window.open(
-                  "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai%3Fmodal%3Dadd-credit-card",
-                  "_blank"
-                );
-                window.location.href = "/";
+                window.location.href = "/payment";
               }}
             >
-              Activate
+              Go to subscription
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

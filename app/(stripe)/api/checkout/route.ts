@@ -1,5 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
+import { auth } from "@/app/(auth)/auth";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
   apiVersion: "2025-10-29.clover",
@@ -7,6 +8,15 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string, {
 
 export async function POST(req: NextRequest) {
   try {
+    const session = await auth();
+
+    if (!session?.user?.id) {
+      return NextResponse.json(
+        { error: "Unauthorized: missing authenticated user" },
+        { status: 401 }
+      );
+    }
+
     const body = await req.json();
 
     const {
@@ -42,10 +52,10 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    let session: Stripe.Checkout.Session;
+    let checkoutSession: Stripe.Checkout.Session;
 
     if (type === "subscription") {
-      session = await stripe.checkout.sessions.create({
+      checkoutSession = await stripe.checkout.sessions.create({
         mode: "subscription",
         line_items: [
           {
@@ -59,10 +69,19 @@ export async function POST(req: NextRequest) {
         metadata: {
           type: "subscription",
           planName,
+          userId: session.user.id,
+        },
+        customer_email: session.user.email ?? undefined,
+        subscription_data: {
+          metadata: {
+            type: "subscription",
+            planName,
+            userId: session.user.id,
+          },
         },
       });
     } else {
-      session = await stripe.checkout.sessions.create({
+      checkoutSession = await stripe.checkout.sessions.create({
         mode: "payment",
         line_items: [
           {
@@ -83,11 +102,12 @@ export async function POST(req: NextRequest) {
         metadata: {
           type: "one_time",
           planName,
+          userId: session.user.id,
         },
       });
     }
 
-    return NextResponse.json({ url: session.url }, { status: 200 });
+    return NextResponse.json({ url: checkoutSession.url }, { status: 200 });
   } catch (err) {
     console.error("Stripe checkout error:", err);
     return NextResponse.json(

@@ -21,6 +21,27 @@ export const user = pgTable("User", {
 
 export type User = InferSelectModel<typeof user>;
 
+export const subscription = pgTable("Subscription", {
+  id: uuid("id").primaryKey().notNull().defaultRandom(),
+  userId: uuid("userId")
+    .notNull()
+    .references(() => user.id),
+  stripeCustomerId: varchar("stripeCustomerId", { length: 255 }).notNull(),
+  stripeSubscriptionId: varchar("stripeSubscriptionId", {
+    length: 255,
+  }).notNull(),
+  stripePriceId: varchar("stripePriceId", { length: 255 }),
+  planName: text("planName"),
+  status: varchar("status", { length: 32 }).notNull(),
+  currentPeriodEnd: timestamp("currentPeriodEnd").notNull(),
+  cancelAtPeriodEnd: boolean("cancelAtPeriodEnd").notNull().default(false),
+  canceledAt: timestamp("canceledAt"),
+  createdAt: timestamp("createdAt").notNull(),
+  updatedAt: timestamp("updatedAt").notNull(),
+});
+
+export type Subscription = InferSelectModel<typeof subscription>;
+
 export const chat = pgTable("Chat", {
   id: uuid("id").primaryKey().notNull().defaultRandom(),
   createdAt: timestamp("createdAt").notNull(),

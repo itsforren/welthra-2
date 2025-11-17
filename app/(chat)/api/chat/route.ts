@@ -20,6 +20,7 @@ import {
   deleteChatById,
   getChatById,
   getMessageCountByUserId,
+  isSubscriptionActiveForUser,
   saveChat,
   saveMessages,
   updateChatLastContextById,
@@ -119,6 +120,17 @@ export async function POST(request: Request) {
 
     if (!session?.user) {
       return new ChatSDKError("unauthorized:chat").toResponse();
+    }
+
+    const hasActiveSubscription = await isSubscriptionActiveForUser({
+      userId: session.user.id,
+    });
+
+    if (!hasActiveSubscription) {
+      return new ChatSDKError(
+        "forbidden:chat",
+        "Subscription required"
+      ).toResponse();
     }
 
     const userType: UserType = session.user.type;
