@@ -6,13 +6,81 @@ import { Toaster } from "sonner";
 import { ThemeProvider } from "@/components/theme-provider";
 
 import "./globals.css";
+
 import { SessionProvider } from "next-auth/react";
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://chat.vercel.ai"),
-  title: "Welthra - Your Personal AI Financial Assistant",
+  metadataBase: new URL("https://www.welthra.ai"),
+  title: {
+    default:
+      "Welthra | Your Agent Copilot for Life Insurance & Wealth Planning",
+    template: "%s | Welthra",
+  },
   description:
-    "Welthra is your personal AI financial assistant. It helps you manage your finances, track your spending, and make informed decisions about your money.",
+    "Welthra is your AI-powered copilot built exclusively for insurance agents. Structure policies, run premium calculations, catch compliance issues, and generate client-ready proposals in minutes—not hours.",
+  keywords: [
+    "Welthra",
+    "Welthra Co-Pilot",
+    "agent copilot",
+    "insurance agents",
+    "life insurance",
+    "IUL",
+    "wealth planning",
+    "insurance CRM",
+    "AI for insurance",
+    "policy structuring",
+    "premium calculations",
+    "compliance guardrails",
+  ],
+  applicationName: "Welthra",
+  authors: [{ name: "Welthra", url: "https://www.welthra.ai" }],
+  creator: "Welthra",
+  publisher: "Welthra",
+
+  alternates: {
+    canonical: "https://www.welthra.ai",
+  },
+
+  openGraph: {
+    type: "website",
+    url: "https://www.welthra.ai",
+    siteName: "Welthra",
+    title: "Welthra Co-Pilot – AI Copilot for Insurance Agents",
+    description:
+      "Write high-quality, compliant life insurance policies in minutes. Welthra Co-Pilot helps agents structure cases, compare carriers, run premium estimates, and generate client-ready proposals with built-in compliance guardrails.",
+    images: [
+      {
+        url: "/images/logo.png", // cámbialo a la ruta real de tu imagen
+        width: 1200,
+        height: 630,
+        alt: "Welthra Co-Pilot – AI Copilot for Insurance Agents",
+      },
+    ],
+  },
+
+  twitter: {
+    card: "summary_large_image",
+    title: "Welthra Co-Pilot – AI Copilot for Insurance Agents",
+    description:
+      "Your AI copilot for life insurance & wealth planning. Structure policies, check carrier-specific requirements, and eliminate compliance guesswork while you close more cases.",
+    site: "@tu_handle_aqui", // opcional, si tienes @welthra o similar
+    creator: "@tu_handle_aqui", // idem
+    images: ["/images/logo.png"],
+  },
+
+  robots: {
+    index: true,
+    follow: true,
+    googleBot: {
+      index: true,
+      follow: true,
+      "max-snippet": -1,
+      "max-image-preview": "large",
+      "max-video-preview": -1,
+    },
+  },
+
+  category: "finance",
 };
 
 export const viewport = {

@@ -25,8 +25,10 @@ import {
   type DBMessage,
   document,
   message,
+  type Subscription,
   type Suggestion,
   stream,
+  subscription,
   suggestion,
   type User,
   user,
@@ -76,6 +78,108 @@ export async function createGuestUser() {
     throw new ChatSDKError(
       "bad_request:database",
       "Failed to create guest user"
+    );
+  }
+}
+
+export async function getLatestSubscriptionByUserId({
+  userId,
+}: {
+  userId: string;
+}): Promise<Subscription | null> {
+  try {
+    const [latestSubscription] = await db
+      .select()
+      .from(subscription)
+      .where(eq(subscription.userId, userId))
+      .orderBy(desc(subscription.currentPeriodEnd))
+      .limit(1);
+
+    return latestSubscription ?? null;
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to get latest subscription by user id"
+    );
+  }
+}
+
+export async function upsertSubscriptionFromStripe({
+  userId,
+  stripeCustomerId,
+  stripeSubscriptionId,
+  stripePriceId,
+  planName,
+  status,
+  currentPeriodEnd,
+  cancelAtPeriodEnd,
+  canceledAt,
+}: {
+  userId: string;
+  stripeCustomerId: string;
+  stripeSubscriptionId: string;
+  stripePriceId?: string | null;
+  planName?: string | null;
+  status: string;
+  currentPeriodEnd: Date;
+  cancelAtPeriodEnd: boolean;
+  canceledAt: Date | null;
+}): Promise<Subscription> {
+  try {
+    const [existingSubscription] = await db
+      .select()
+      .from(subscription)
+      .where(
+        and(
+          eq(subscription.userId, userId),
+          eq(subscription.stripeSubscriptionId, stripeSubscriptionId)
+        )
+      )
+      .limit(1);
+
+    const now = new Date();
+
+    if (existingSubscription) {
+      const [updatedSubscription] = await db
+        .update(subscription)
+        .set({
+          stripeCustomerId,
+          stripePriceId: stripePriceId ?? existingSubscription.stripePriceId,
+          planName: planName ?? existingSubscription.planName,
+          status,
+          currentPeriodEnd,
+          cancelAtPeriodEnd,
+          canceledAt,
+          updatedAt: now,
+        })
+        .where(eq(subscription.id, existingSubscription.id))
+        .returning();
+
+      return updatedSubscription;
+    }
+
+    const [createdSubscription] = await db
+      .insert(subscription)
+      .values({
+        userId,
+        stripeCustomerId,
+        stripeSubscriptionId,
+        stripePriceId: stripePriceId ?? null,
+        planName: planName ?? null,
+        status,
+        currentPeriodEnd,
+        cancelAtPeriodEnd,
+        canceledAt,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+
+    return createdSubscription;
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to upsert subscription from Stripe"
     );
   }
 }
@@ -569,6 +673,36 @@ export async function getMessageCountByUserId({
     throw new ChatSDKError(
       "bad_request:database",
       "Failed to get message count by user id"
+    );
+  }
+}
+
+export async function isSubscriptionActiveForUser({
+  userId,
+}: {
+  userId: string;
+}): Promise<boolean> {
+  try {
+    const now = new Date();
+
+    const [activeSubscription] = await db
+      .select()
+      .from(subscription)
+      .where(
+        and(
+          eq(subscription.userId, userId),
+          inArray(subscription.status, ["active", "trialing"]),
+          gte(subscription.currentPeriodEnd, now)
+        )
+      )
+      .orderBy(desc(subscription.currentPeriodEnd))
+      .limit(1);
+
+    return Boolean(activeSubscription);
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to check active subscription for user"
     );
   }
 }
