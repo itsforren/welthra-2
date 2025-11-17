@@ -3,7 +3,7 @@
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { useSearchParams } from "next/navigation";
-import { signOut } from "next-auth/react";
+import { signOut, useSession } from "next-auth/react";
 import { useEffect, useRef, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import { unstable_serialize } from "swr/infinite";
@@ -55,6 +55,10 @@ export function Chat({
     chatId: id,
     initialVisibilityType,
   });
+
+  const { data: session } = useSession();
+
+  console.log("session", session);
 
   const { mutate } = useSWRConfig();
   const { setDataStream } = useDataStream();
@@ -221,9 +225,11 @@ export function Chat({
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogAction onClick={() => signOut({ redirect: true })}>
-              Logout
-            </AlertDialogAction>
+            {session?.user?.type === "regular" && (
+              <AlertDialogAction onClick={() => signOut({ redirect: true })}>
+                Logout
+              </AlertDialogAction>
+            )}
             <AlertDialogAction
               onClick={() => {
                 window.location.href = "/payment";
