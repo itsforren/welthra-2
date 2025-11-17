@@ -57,6 +57,13 @@ export async function POST(req: NextRequest) {
           .object as StripeSubscriptionWithPeriods;
         const userId = subscriptionObject.metadata.userId;
 
+        console.log("userId", userId);
+        console.log("subscriptionObject", subscriptionObject);
+        console.log(
+          "CUSTOMER.SUBSCRIPTION.CREATED || UPDATED || DELETED",
+          event
+        );
+
         if (!userId) {
           // If we cannot associate the subscription with a user, we acknowledge the event
           // to avoid retries but do not attempt to write to the database.
@@ -113,6 +120,8 @@ export async function POST(req: NextRequest) {
         if (session.mode !== "subscription") {
           break;
         }
+
+        console.log("CHECKOUT.SESSION.COMPLETED", session);
 
         // For safety, we ensure the subscription event handler will still be the
         // source of truth. Here we only handle the case where the subscription
