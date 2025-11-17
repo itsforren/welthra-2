@@ -49,6 +49,7 @@ function PureMultimodalInput({
   selectedVisibilityType,
   selectedModelId,
   usage,
+  canUseAI = true,
 }: {
   chatId: string;
   input: string;
@@ -64,6 +65,7 @@ function PureMultimodalInput({
   selectedVisibilityType: VisibilityType;
   selectedModelId: string;
   usage?: AppUsage;
+  canUseAI?: boolean;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { width } = useWindowSize();
@@ -302,11 +304,17 @@ function PureMultimodalInput({
         className="rounded-xl border border-border bg-background p-3 shadow-xs transition-all duration-200 focus-within:border-border hover:border-muted-foreground/50"
         onSubmit={(event) => {
           event.preventDefault();
+
           if (status !== "ready") {
             toast.error("Please wait for the model to finish its response!");
-          } else {
-            submitForm();
+            return;
           }
+
+          if (!canUseAI) {
+            return;
+          }
+
+          submitForm();
         }}
       >
         {(attachments.length > 0 || uploadQueue.length > 0) && (
