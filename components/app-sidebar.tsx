@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { User } from "next-auth";
@@ -22,6 +23,7 @@ import {
   SidebarMenu,
   useSidebar,
 } from "@/components/ui/sidebar";
+import Logo from "@/public/images/logo.png";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -64,14 +66,22 @@ export function AppSidebar({ user }: { user: User | undefined }) {
           <SidebarMenu>
             <div className="flex flex-row items-center justify-between">
               <Link
-                className="flex flex-row items-center gap-3"
+                className="flex flex-row items-center"
                 href="/"
                 onClick={() => {
                   setOpenMobile(false);
                 }}
               >
+                <Image
+                  alt="WELTHRA AI"
+                  className="h-8 w-8"
+                  height={32}
+                  priority
+                  src={Logo}
+                  width={32}
+                />
                 <span className="cursor-pointer rounded-md px-2 font-semibold text-lg hover:bg-muted">
-                  WELTHRA AI
+                  WELTHRA
                 </span>
               </Link>
               <div className="flex flex-row gap-1">
