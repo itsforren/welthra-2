@@ -450,7 +450,7 @@ const AttachmentsButton = memo(PureAttachmentsButton);
 function PureModelSelectorCompact() {
   return (
     <div>
-      <p className="font-medium text-sm">Welthra AI Assistant</p>
+      <p className="font-medium text-sm">Welthra AI Co-Pilot</p>
     </div>
   );
 }
