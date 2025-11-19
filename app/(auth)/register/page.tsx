@@ -70,6 +70,16 @@ export default function Page() {
             </Link>
             {" instead."}
           </p>
+
+          <p className="text-center text-gray-600 text-sm dark:text-zinc-400">
+            {"Forgot your password? "}
+            <Link
+              className="font-semibold text-gray-800 hover:underline dark:text-zinc-200"
+              href="/recover"
+            >
+              Reset password
+            </Link>
+          </p>
         </AuthForm>
       </div>
     </div>

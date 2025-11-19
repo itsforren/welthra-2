@@ -70,14 +70,37 @@ export async function createGuestUser() {
   const password = generateHashedPassword(generateUUID());
 
   try {
-    return await db.insert(user).values({ email, password }).returning({
-      id: user.id,
-      email: user.email,
-    });
+    return await db
+      .insert(user)
+      .values({ email, password, role: "user" })
+      .returning({
+        id: user.id,
+        email: user.email,
+        role: user.role,
+      });
   } catch (_error) {
     throw new ChatSDKError(
       "bad_request:database",
       "Failed to create guest user"
+    );
+  }
+}
+
+export async function updateUserPasswordByEmail(
+  email: string,
+  password: string
+) {
+  const hashedPassword = generateHashedPassword(password);
+
+  try {
+    await db
+      .update(user)
+      .set({ password: hashedPassword })
+      .where(eq(user.email, email));
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to update user password"
     );
   }
 }

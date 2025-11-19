@@ -31,6 +31,7 @@ export function SidebarUserNav({ user }: { user: User }) {
   const isGuest = guestRegex.test(data?.user?.email ?? "");
 
   const { isActive: hasActiveSubscription } = useSubscriptionStatus();
+  const isAdmin = data?.user?.role === "admin";
 
   const handleCancelSubscription = async () => {
     try {
@@ -110,6 +111,15 @@ export function SidebarUserNav({ user }: { user: User }) {
               </DropdownMenuItem>
             )}
 
+            {isAdmin && (
+              <DropdownMenuItem
+                className="cursor-pointer"
+                data-testid="user-nav-item-cancel-subscription"
+                onSelect={() => router.push("/admin")}
+              >
+                Admin Panel
+              </DropdownMenuItem>
+            )}
             <DropdownMenuItem
               className="cursor-pointer"
               data-testid="user-nav-item-theme"

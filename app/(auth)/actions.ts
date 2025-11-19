@@ -2,7 +2,11 @@
 
 import { z } from "zod";
 
-import { createUser, getUser } from "@/lib/db/queries";
+import {
+  createUser,
+  getUser,
+  updateUserPasswordByEmail,
+} from "@/lib/db/queries";
 
 import { signIn } from "./auth";
 
@@ -72,6 +76,76 @@ export const register = async (
       password: validatedData.password,
       redirect: false,
     });
+
+    return { status: "success" };
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return { status: "invalid_data" };
+    }
+
+    return { status: "failed" };
+  }
+};
+
+export type RecoverActionState = {
+  status:
+    | "idle"
+    | "in_progress"
+    | "success"
+    | "failed"
+    | "user_not_found"
+    | "invalid_data";
+};
+
+export type RecoverLookupState = {
+  status: "idle" | "user_found" | "user_not_found" | "invalid_data" | "failed";
+};
+
+export const recoverLookup = async (
+  _: RecoverLookupState,
+  formData: FormData
+): Promise<RecoverLookupState> => {
+  try {
+    const validatedData = authFormSchema.pick({ email: true }).parse({
+      email: formData.get("email"),
+    });
+
+    const [user] = await getUser(validatedData.email);
+
+    if (!user) {
+      return { status: "user_not_found" };
+    }
+
+    return { status: "user_found" };
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return { status: "invalid_data" };
+    }
+
+    return { status: "failed" };
+  }
+};
+
+export const recoverPassword = async (
+  _: RecoverActionState,
+  formData: FormData
+): Promise<RecoverActionState> => {
+  try {
+    const validatedData = authFormSchema.parse({
+      email: formData.get("email"),
+      password: formData.get("password"),
+    });
+
+    const [user] = await getUser(validatedData.email);
+
+    if (!user) {
+      return { status: "user_not_found" };
+    }
+
+    await updateUserPasswordByEmail(
+      validatedData.email,
+      validatedData.password
+    );
 
     return { status: "success" };
   } catch (error) {

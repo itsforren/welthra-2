@@ -3,16 +3,17 @@ import NextAuth, { type DefaultSession } from "next-auth";
 import type { DefaultJWT } from "next-auth/jwt";
 import Credentials from "next-auth/providers/credentials";
 import { DUMMY_PASSWORD } from "@/lib/auth/constants";
-import { createGuestUser, getUser } from "@/lib/db/queries";
+import { getUser } from "@/lib/db/queries";
 import { authConfig } from "./auth.config";
 
-export type UserType = "guest" | "regular";
+export type UserType = "regular";
 
 declare module "next-auth" {
   interface Session extends DefaultSession {
     user: {
       id: string;
       type: UserType;
+      role: "admin" | "user";
     } & DefaultSession["user"];
   }
 
@@ -20,6 +21,7 @@ declare module "next-auth" {
   interface User {
     id?: string;
     email?: string | null;
+    role: "admin" | "user";
     type: UserType;
   }
 }
@@ -28,6 +30,7 @@ declare module "next-auth/jwt" {
   interface JWT extends DefaultJWT {
     id: string;
     type: UserType;
+    role: "admin" | "user";
   }
 }
 
@@ -50,6 +53,7 @@ export const {
         }
 
         const [user] = users;
+        const role = (user.role as "admin" | "user") ?? "user";
 
         if (!user.password) {
           await compare(password, DUMMY_PASSWORD);
@@ -62,15 +66,7 @@ export const {
           return null;
         }
 
-        return { ...user, type: "regular" };
-      },
-    }),
-    Credentials({
-      id: "guest",
-      credentials: {},
-      async authorize() {
-        const [guestUser] = await createGuestUser();
-        return { ...guestUser, type: "guest" };
+        return { ...user, type: "regular", role };
       },
     }),
   ],
@@ -79,6 +75,7 @@ export const {
       if (user) {
         token.id = user.id as string;
         token.type = user.type;
+        token.role = (user.role as "admin" | "user") ?? "user";
       }
 
       return token;
@@ -87,6 +84,7 @@ export const {
       if (session.user) {
         session.user.id = token.id;
         session.user.type = token.type;
+        session.user.role = token.role;
       }
 
       return session;
