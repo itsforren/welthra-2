@@ -86,6 +86,25 @@ export async function createGuestUser() {
   }
 }
 
+export async function updateUserPasswordByEmail(
+  email: string,
+  password: string
+) {
+  const hashedPassword = generateHashedPassword(password);
+
+  try {
+    await db
+      .update(user)
+      .set({ password: hashedPassword })
+      .where(eq(user.email, email));
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to update user password"
+    );
+  }
+}
+
 export async function getLatestSubscriptionByUserId({
   userId,
 }: {

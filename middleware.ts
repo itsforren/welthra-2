@@ -2,8 +2,6 @@ import { type NextRequest, NextResponse } from "next/server";
 import { getToken } from "next-auth/jwt";
 import { isDevelopmentEnvironment } from "./lib/constants";
 
-const PUBLIC_ROUTES = ["/", "/login", "/register"];
-
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
@@ -21,27 +19,15 @@ export async function middleware(request: NextRequest) {
     secureCookie: !isDevelopmentEnvironment,
   });
 
-  const isPublicRoute = PUBLIC_ROUTES.includes(pathname);
-
-  if (token && token.type === "guest") {
-    if (pathname.startsWith("/payment")) {
-      return NextResponse.redirect(new URL("/login", request.url));
-    }
-    if (isPublicRoute) {
-      return NextResponse.next();
-    }
-
-    return NextResponse.redirect(new URL("/login", request.url));
-  }
-
-  if (token && token.role !== "admin" && !pathname.startsWith("/admin")) {
+  if (pathname.startsWith("/admin") && (!token || token.role !== "admin")) {
     return NextResponse.redirect(new URL("/", request.url));
   }
 
   if (
     token &&
-    token.type === "regular" &&
-    (pathname === "/login" || pathname === "/register")
+    (pathname === "/login" ||
+      pathname === "/register" ||
+      pathname === "/recover")
   ) {
     return NextResponse.redirect(new URL("/", request.url));
   }
