@@ -98,7 +98,7 @@ export type RecoverActionState = {
 };
 
 export type RecoverLookupState = {
-  status: "idle" | "user_found" | "user_not_found" | "invalid_data";
+  status: "idle" | "user_found" | "user_not_found" | "invalid_data" | "failed";
 };
 
 export const recoverLookup = async (
