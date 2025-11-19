@@ -34,6 +34,29 @@ export type AdminUpdateUserInput = {
   role: string;
 };
 
+export async function GetUserByEmail(email: string): Promise<AdminUserRecord> {
+  const [userData] = await db
+
+    .select({
+      id: user.id,
+      email: user.email,
+      role: user.role,
+    })
+    .from(user)
+    .where(eq(user.email, email));
+
+  const latestSubscription = await getLatestSubscriptionByUserId({
+    userId: userData.id,
+  });
+
+  const subscriptionStatus = latestSubscription?.status ?? null;
+
+  return {
+    ...userData,
+    subscriptionStatus,
+  };
+}
+
 export async function adminCreateUser(
   input: AdminCreateUserInput
 ): Promise<AdminUserRecord> {
