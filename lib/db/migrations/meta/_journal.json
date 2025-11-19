@@ -71,6 +71,13 @@
       "when": 1763397323206,
       "tag": "0009_previous_shotgun",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1763507207211,
+      "tag": "0010_plain_crusher_hogan",
+      "breakpoints": true
     }
   ]
 }
